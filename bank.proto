@@ -42,11 +42,12 @@ enum Source {
 message MsgDelivery_request {
   Operation     operation_type    = 1;  //operation type
   Source        source_type       = 2;  //Source type
-  int32         id                = 3;  //Source Branch/Customer id
+  int32         id                = 3;  //Original customer id
   int32         amount            = 4;  //Amount of money
   int32         clock             = 5;  //Clock
   int32         last_write_id     = 6;  //Last write ID
   int32         last_write_branch = 7;  //Last write branch ID
+  string        write_set         = 8;  //write_set string
 
 }
 

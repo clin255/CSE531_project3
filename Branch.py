@@ -3,6 +3,7 @@ import bank_pb2
 import bank_pb2_grpc
 import time
 import pdb
+import json
 from utilities import configure_logger, get_operation_name, get_result_name, get_source_type_name
 from concurrent import futures
 
@@ -27,8 +28,10 @@ class Branch(bank_pb2_grpc.BankServicer):
         self.clock = 1
         # write_id
         self.write_id = 0
-        # write_set
-        self.write_set = []
+        # write_set based on customer id
+        self.write_set = {}
+        # write lock
+        self.lock = False
 
     # TODO: students are expected to process requests from both Client and Branch
     def MsgDelivery(self, request, context):
@@ -38,25 +41,29 @@ class Branch(bank_pb2_grpc.BankServicer):
         source_type = get_source_type_name(request.source_type)
         #if request is a query, sleep 3 seconds and make sure all of propagate completed
         if request.operation_type == bank_pb2.Operation.query:
-            time.sleep(3)
+            #if customer request is first time request, create empty write_set for customer
+            if request.last_write_branch == 0 and request.last_write_id == 0:
+                self.write_set[request.id] = []
+            logger.info("Branch {} has received customer {} request, verifying the write_set....".format(self.id, request.id))
+            #This is part of implement read your write
+            #Customer sent complete write_set, branch verify the write_set received is equal to local write_set
+            if json.loads(request.write_set) != self.write_set[request.id]:
+                op_result = bank_pb2.Result.error
+                logger.info("Branch write_set verify failed, customer write_set {} != branch write_set {}".format(
+                    request.write_set, 
+                    self.write_set[request.id]
+                    )
+                )
+                return self.Response(op_result, new_balance)
+            logger.info("Branch write_set verify succeed..customer write_set {} == local write_set {}".format(
+                request.write_set,
+                self.write_set[request.id]
+                )
+            )
             new_balance = self.balance
             op_result = bank_pb2.Result.success
-        #if request from customer, run consistency check and propagate
+        #if request from customer, run propagate
         elif request.source_type == bank_pb2.Source.customer:
-            #customer non first time request, need to verify the write_set
-            if request.last_write_branch != 0 and request.last_write_id != 0:
-                logger.info("Branch {} has received customer {} request, verifying the write_set....".format(self.id, request.id))
-                logger.info("Customer request write_set {} : {}".format(request.last_write_branch, request.last_write_id))
-                logger.info("Branch last write_set {} : {}".format(*self.write_set[-1]))
-                if not self.is_write_set_consistency(request):
-                    op_result = bank_pb2.Result.error
-                    logger.info("Branch write_set verify failed....")
-                    return self.Response(op_result, new_balance)
-                logger.info("Branch write_set verify successful....")
-            else:
-                logger.info("Branch {} has received customer {} first time request, skip verify the write_set....".format(self.id, request.id))
-                
-
             self.Event_Request(operation_name, source_type, request.id, request.clock)
             if request.operation_type == bank_pb2.Operation.withdraw:
                 op_result, new_balance = self.WithDraw(request.amount)
@@ -64,14 +71,18 @@ class Branch(bank_pb2_grpc.BankServicer):
                 op_result, new_balance = self.Deposit(request.amount)
             self.Event_Execute(operation_name, request.id)
             if op_result == bank_pb2.Result.success:
+                #if customer request is first time request, create empty write_set for customer
+                if request.last_write_branch == 0 and request.last_write_id == 0:
+                    self.write_set[request.id] = []
                 self.write_id += 1
-                self.write_set.append((self.id, self.write_id))
-                self.Branch_Propagate(request.operation_type, request.amount)
+                logger.info("Appending write_set ....")
+                self.write_set[request.id].append({"pid":self.id, "wid": self.write_id})
+                self.Branch_Propagate(request.id, request.operation_type, request.amount)
                 self.Event_Response(operation_name, request.id)
 
         #if request from branch, no progagate
         elif request.source_type == bank_pb2.Source.branch:
-            #execute propagate request
+            #execute propagate request 
             self.Propagate_Request(operation_name, source_type, request.id, request.clock)
             if request.operation_type == bank_pb2.Operation.withdraw:
                 op_result, new_balance = self.WithDraw(request.amount)
@@ -81,8 +92,11 @@ class Branch(bank_pb2_grpc.BankServicer):
             self.Propagate_Execute(operation_name, request.id)
             #update local self.write_id from propagate request
             self.write_id = request.last_write_id
+            #if write_set does not have key for customer, that means customer first write, so create empty list for new customer
+            if request.id not in self.write_set:
+                self.write_set[request.id] = []
             #update the write_set from propagate request
-            self.write_set.append((request.last_write_branch, request.last_write_id))
+            self.write_set[request.id].append({"pid":request.last_write_branch, "wid":request.last_write_id})
         #customer response or propagate response
         response = self.Response(op_result, new_balance)
         logger.info("Branch {} operation result {}, amount {}, clock {}, last_write_id {}".format(
@@ -115,27 +129,42 @@ class Branch(bank_pb2_grpc.BankServicer):
     def Deposit(self, amount):
         if amount < 0:
             return bank_pb2.Result.error, amount
+        #This is part of monotonic-write consistency implement
+        #if self.lock == True, which is indicated process doing write operation, have to wait
+        while self.lock:
+            time.sleep(1)
         self.balance += amount
+        #This is part of monotonic-write consistency implement
+        #After write operation completed, change self.lock to False which indicate process is ready for next write operation
+        self.lock = False
         return bank_pb2.Result.success, self.balance
 
     def WithDraw(self, amount):
         if amount > self.balance:
             return bank_pb2.Result.failure, amount
+        #This is part of monotonic-write consistency implement
+        #if self.lock == True, which is indicated process doing write operation, have to wait
+        while self.lock:
+            time.sleep(1)
         self.balance -= amount
+        #This is part of monotonic-write consistency implement
+        #After write operation completed, change self.lock to False which indicate process is ready for next write operation
+        self.lock = False
         return bank_pb2.Result.success, self.balance
     
-    def Create_propagate_request(self, operation_type, amount):
+    def Create_propagate_request(self, customer_id, operation_type, amount):
         """
         Build the branch propagate request context
         """
         request = bank_pb2.MsgDelivery_request(
             operation_type = operation_type,
             source_type = bank_pb2.Source.branch,
-            id = self.id,
+            id = customer_id,
             amount = amount,
             clock = self.clock,
             last_write_id = self.write_id,
             last_write_branch = self.id,
+            write_set = ""
         )
         return request
 
@@ -149,7 +178,7 @@ class Branch(bank_pb2_grpc.BankServicer):
                 stub = bank_pb2_grpc.BankStub(grpc.insecure_channel(bind_address))
                 self.stubList.append(stub)
 
-    def Branch_Propagate(self, operation_type, amount):
+    def Branch_Propagate(self, customer_id, operation_type, amount):
         """
         Run branches propagate
         If all of branches propagate return success, return list of branches propagate response clock
@@ -158,7 +187,7 @@ class Branch(bank_pb2_grpc.BankServicer):
         if len(self.stubList) == 0:
             self.Create_branches_stub()
         for stub in self.stubList:
-            propagate_request = self.Create_propagate_request(operation_type, amount)
+            propagate_request = self.Create_propagate_request(customer_id, operation_type, amount)
             response = stub.MsgDelivery(propagate_request)
             logger.info("Propagate response {} from branch {}".format(
                 get_result_name(response.operation_result), 

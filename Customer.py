@@ -67,10 +67,12 @@ class Customer:
                 clock = self.clock,
                 last_write_id = self.last_write_id,
                 last_write_branch = self.last_write_branch,
+                write_set = json.dumps(self.write_set)
             )
             stub = self.createStub(branch_id, self.branches_bind_addresses[branch_id])
             response = stub.MsgDelivery(customer_request)
             self.recvMsg.append(response)
+            self.write_set.append({"pid":response.id, "wid": response.last_write_id})
             logger.info("Customer {} has recevied the response from {} id {}, amount {}, clock {}, last_write_id {}".format(
                 self.id, 
                 get_source_type_name(response.source_type), 

@@ -52,10 +52,6 @@ def branch_service(branch, branches_bind_addresses, output):
         branches_bind_addresses[branch.id].split(":")[-1]
         )
     )
-    #Add delay and make sure all of customer events executed before export events
-    time.sleep(15)
-    #Export the event data to share dict
-    output.append(branch.export())
     server.wait_for_termination()
 
 def main():
