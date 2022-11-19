@@ -42,29 +42,23 @@ class Branch(bank_pb2_grpc.BankServicer):
         #if request is a query, sleep 3 seconds and make sure all of propagate completed
         if request.operation_type == bank_pb2.Operation.query:
             #if customer request is first time request, create empty write_set for customer
-            if request.last_write_branch == 0 and request.last_write_id == 0:
-                self.write_set[request.id] = []
+            self.is_customer_first_operation(request)
             logger.info("Branch {} has received customer {} request, verifying the write_set....".format(self.id, request.id))
-            #This is part of implement read your write
             #Customer sent complete write_set, branch verify the write_set received is equal to local write_set
-            if json.loads(request.write_set) != self.write_set[request.id]:
+            if not self.check_write_set(request):
                 op_result = bank_pb2.Result.error
-                logger.info("Branch write_set verify failed, customer write_set {} != branch write_set {}".format(
-                    request.write_set, 
-                    self.write_set[request.id]
-                    )
-                )
                 return self.Response(op_result, new_balance)
-            logger.info("Branch write_set verify succeed..customer write_set {} == local write_set {}".format(
-                request.write_set,
-                self.write_set[request.id]
-                )
-            )
             new_balance = self.balance
             op_result = bank_pb2.Result.success
         #if request from customer, run propagate
         elif request.source_type == bank_pb2.Source.customer:
             self.Event_Request(operation_name, source_type, request.id, request.clock)
+            #if customer request is first time request, create empty write_set for customer
+            self.is_customer_first_operation(request)
+            #Customer sent complete write_set, branch verify the write_set received is equal to local write_set
+            if not self.check_write_set(request):
+                op_result = bank_pb2.Result.error
+                return self.Response(op_result, new_balance)
             if request.operation_type == bank_pb2.Operation.withdraw:
                 op_result, new_balance = self.WithDraw(request.amount)
             if request.operation_type == bank_pb2.Operation.deposit:
@@ -93,8 +87,7 @@ class Branch(bank_pb2_grpc.BankServicer):
             #update local self.write_id from propagate request
             self.write_id = request.last_write_id
             #if write_set does not have key for customer, that means customer first write, so create empty list for new customer
-            if request.id not in self.write_set:
-                self.write_set[request.id] = []
+            self.is_customer_first_operation(request)
             #update the write_set from propagate request
             self.write_set[request.id].append({"pid":request.last_write_branch, "wid":request.last_write_id})
         #customer response or propagate response
@@ -122,9 +115,25 @@ class Branch(bank_pb2_grpc.BankServicer):
             last_write_id = self.write_id
         )
         return response
-    
-    def is_write_set_consistency(self, request):
-        return self.write_set[-1] == (request.last_write_branch, request.last_write_id)
+
+    def is_customer_first_operation(self, request):
+        if request.id not in self.write_set:
+                self.write_set[request.id] = []
+
+    def check_write_set(self, request):
+        if json.loads(request.write_set) != self.write_set[request.id]:
+            logger.info("Branch write_set verify failed, customer write_set {} != branch write_set {}".format(
+                request.write_set, 
+                self.write_set[request.id]
+                )
+            )
+            return False
+        logger.info("Branch write_set verify succeed..customer write_set {} == local write_set {}".format(
+            request.write_set,
+            self.write_set[request.id]
+            )
+        )
+        return True
 
     def Deposit(self, amount):
         if amount < 0:

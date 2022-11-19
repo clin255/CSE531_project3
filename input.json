@@ -5,8 +5,7 @@
       "events" :  [
         {"interface": "deposit", "money": 400, "dest": 3},
         {"interface": "withdraw", "money": 400, "dest": 2},
-        {"interface":"query", "dest": 1 }
-    ]
+        {"interface":"query", "dest": 1 }]
     },
     {
       "id" : 2,
